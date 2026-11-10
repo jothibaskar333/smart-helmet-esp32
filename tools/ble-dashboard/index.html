@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart Helmet Dashboard</title>
+<!--
+  Web Bluetooth dashboard for the Active-Safety Helmet firmware.
+  Works in Chrome / Edge on desktop and Android (not iOS Safari / Firefox).
+  Open the file directly or serve it over https / localhost, then press Connect.
+  Protocol: see firmware/src/modules/ble_service.h
+-->
+<style>
+  :root {
+    --bg: #f4f6f8; --card: #ffffff; --text: #17202a; --muted: #5d6d7e; --line: #d5dbe1;
+    --ok: #1e8449; --warn: #b9770e; --bad: #c0392b; --accent: #1f618d; --bar: #d6eaf8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #11161c; --card: #1a222c; --text: #e8edf2; --muted: #93a1b0; --line: #2c3845;
+      --ok: #52be80; --warn: #f5b041; --bad: #ec7063; --accent: #5dade2; --bar: #22384b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         background: var(--bg); color: var(--text); }
+  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+           padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--card); }
+  header h1 { font-size: 18px; margin: 0; flex: 1; }
+  button { font: inherit; border: 1px solid var(--accent); background: var(--accent); color: #fff;
+           padding: 7px 14px; border-radius: 6px; cursor: pointer; }
+  button.secondary { background: transparent; color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  .pill { font-size: 13px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+  .pill.on { color: var(--ok); border-color: var(--ok); }
+  main { max-width: 1000px; margin: 0 auto; padding: 16px; display: grid; gap: 14px;
+         grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
+  .big { font-size: 26px; font-weight: 600; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  .row { display: flex; justify-content: space-between; gap: 8px; margin: 4px 0; }
+  .row span:first-child { color: var(--muted); }
+  .meter { height: 12px; background: var(--bar); border-radius: 6px; overflow: hidden; margin: 4px 0 10px; }
+  .meter > div { height: 100%; width: 0; background: var(--accent); transition: width .25s; }
+  .meter.alert > div { background: var(--bad); }
+  #banner { display: none; grid-column: 1 / -1; background: var(--bad); color: #fff; border-radius: 10px;
+            padding: 16px; font-size: 18px; font-weight: 600; align-items: center; gap: 12px; flex-wrap: wrap; }
+  #banner.show { display: flex; animation: pulse 1s infinite alternate; }
+  #banner button { background: #fff; color: var(--bad); border-color: #fff; margin-left: auto; }
+  @keyframes pulse { from { opacity: 1; } to { opacity: .8; } }
+  #log { grid-column: 1 / -1; }
+  #log ol { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow: auto;
+            font: 13px/1.6 ui-monospace, Consolas, monospace; }
+  #log li { border-bottom: 1px solid var(--line); padding: 2px 0; }
+  .flags { display: flex; flex-wrap: wrap; gap: 6px; }
+  .flag { font-size: 12px; padding: 2px 8px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); }
+  .flag.active { background: var(--bad); border-color: var(--bad); color: #fff; }
+  #unsupported { display: none; grid-column: 1 / -1; }
+  @media (max-width: 480px) { .big { font-size: 22px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Active-Safety Helmet</h1>
+  <span id="conn" class="pill">disconnected</span>
+  <button id="connectBtn">Connect</button>
+  <button id="disconnectBtn" class="secondary" disabled>Disconnect</button>
+</header>
+
+<main>
+  <div id="unsupported" class="card bad">
+    Web Bluetooth is not available in this browser. Use Chrome or Edge on desktop or Android
+    (open this file directly, or serve it from https:// or http://localhost).
+  </div>
+
+  <div id="banner">
+    <span>CRASH DETECTED: check on the rider</span>
+    <button id="clearBtn">Clear crash latch</button>
+  </div>
+
+  <section class="card">
+    <h2>Helmet &amp; ignition</h2>
+    <div class="big" id="helmet">-</div>
+    <div class="row"><span>Ignition</span><b id="ign">-</b></div>
+    <div class="row"><span>IR raw</span><span id="ir">-</span></div>
+    <div class="row"><span>Uptime</span><span id="uptime">-</span></div>
+  </section>
+
+  <section class="card">
+    <h2>Blind spot</h2>
+    <div class="row"><span>Left</span><b id="dl">-</b></div>
+    <div class="meter" id="mL"><div></div></div>
+    <div class="row"><span>Right</span><b id="dr">-</b></div>
+    <div class="meter" id="mR"><div></div></div>
+  </section>
+
+  <section class="card">
+    <h2>Rider state</h2>
+    <div class="row"><span>Head pitch vs. baseline</span><b id="pitch">-</b></div>
+    <div class="row"><span>Drowsiness</span><b id="drowsy">-</b></div>
+    <div class="row"><span>Heart rate</span><span id="hr">-</span></div>
+  </section>
+
+  <section class="card">
+    <h2>Adaptive fit</h2>
+    <div class="row"><span>Strap pressure (FSR)</span><b id="fsr">-</b></div>
+    <div class="meter" id="mF"><div></div></div>
+    <div class="row"><span>Servo angle</span><span id="servo">-</span></div>
+  </section>
+
+  <section class="card">
+    <h2>Active alerts</h2>
+    <div class="flags" id="flags"></div>
+  </section>
+
+  <section class="card" id="log">
+    <h2>Event log</h2>
+    <ol id="events"></ol>
+  </section>
+</main>
+
+<script>
+const SERVICE = "6e3a0001-5a17-4c3e-9b8a-2f6d1e7a0001";
+const STATUS  = "6e3a0002-5a17-4c3e-9b8a-2f6d1e7a0001";
+const ALERT   = "6e3a0003-5a17-4c3e-9b8a-2f6d1e7a0001";
+const COMMAND = "6e3a0004-5a17-4c3e-9b8a-2f6d1e7a0001";
+const BS_ALERT_CM = 70, NO_ECHO_CM = 400;
+const FLAG_NAMES = ["Helmet on", "Ignition", "Grace", "Crash", "Drowsy", "Blind L", "Blind R", "Fit fault"];
+const IGN_TEXT = { 0: "LOCKED", 1: "ENABLED", 2: "GRACE" };
+
+let device = null, cmdChar = null;
+const $ = (id) => document.getElementById(id);
+
+if (!navigator.bluetooth) {
+  $("unsupported").style.display = "block";
+  $("connectBtn").disabled = true;
+}
+
+function logEvent(text) {
+  const li = document.createElement("li");
+  li.textContent = `${new Date().toLocaleTimeString()}  ${text}`;
+  $("events").prepend(li);
+  while ($("events").children.length > 200) $("events").lastChild.remove();
+}
+
+function setMeter(id, fraction, alert) {
+  const m = $(id);
+  m.firstElementChild.style.width = `${Math.max(0, Math.min(1, fraction)) * 100}%`;
+  m.classList.toggle("alert", !!alert);
+}
+
+function fmtDist(cm) { return cm >= NO_ECHO_CM ? "clear" : `${cm} cm`; }
+
+function onStatus(event) {
+  const v = event.target.value;  // DataView, little-endian struct (ble_service.h)
+  if (v.byteLength < 18 || v.getUint8(0) !== 1) return;
+  const flags = v.getUint8(1);
+  const bit = (n) => (flags >> n) & 1;
+  const dl = v.getUint16(2, true), dr = v.getUint16(4, true);
+  const pitch = v.getInt16(6, true) / 10;
+  const fsr = v.getUint16(8, true), servo = v.getUint8(10), hr = v.getUint8(11);
+  const ir = v.getUint16(12, true), up = v.getUint32(14, true);
+
+  $("helmet").textContent = bit(0) ? "Helmet ON" : "Helmet OFF";
+  $("helmet").className = "big " + (bit(0) ? "ok" : "warn");
+  const ign = bit(2) ? 2 : bit(1) ? 1 : 0;
+  $("ign").textContent = IGN_TEXT[ign];
+  $("ign").className = ign === 1 ? "ok" : ign === 2 ? "warn" : "bad";
+  $("ir").textContent = ir;
+  $("uptime").textContent = `${(up / 1000).toFixed(0)} s`;
+
+  $("dl").textContent = fmtDist(dl); $("dr").textContent = fmtDist(dr);
+  // Bars fill up as an object gets closer (full at 0 cm, empty at 2x the alert range).
+  setMeter("mL", 1 - Math.min(dl, 2 * BS_ALERT_CM) / (2 * BS_ALERT_CM), bit(5));
+  setMeter("mR", 1 - Math.min(dr, 2 * BS_ALERT_CM) / (2 * BS_ALERT_CM), bit(6));
+
+  $("pitch").textContent = `${pitch.toFixed(1)}°`;
+  $("drowsy").textContent = bit(4) ? "ALERT" : "normal";
+  $("drowsy").className = bit(4) ? "bad" : "ok";
+  $("hr").textContent = hr ? `${hr} bpm` : "n/a";
+
+  $("fsr").textContent = fsr;
+  setMeter("mF", fsr / 4095, bit(7));
+  $("servo").textContent = `${servo}°`;
+
+  $("flags").innerHTML = "";
+  FLAG_NAMES.forEach((name, i) => {
+    if (i < 2) return;  // helmet/ignition are shown in their own card
+    const el = document.createElement("span");
+    el.className = "flag" + (bit(i) ? " active" : "");
+    el.textContent = name;
+    $("flags").appendChild(el);
+  });
+  $("banner").classList.toggle("show", !!bit(3));
+}
+
+function onAlert(event) {
+  const text = new TextDecoder().decode(event.target.value);
+  logEvent(text);
+  if (text === "CRASH,1") $("banner").classList.add("show");
+  if (text === "CRASH,0") $("banner").classList.remove("show");
+}
+
+async function connect() {
+  try {
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [SERVICE] }, { namePrefix: "SmartHelmet" }],
+      optionalServices: [SERVICE],
+    });
+    device.addEventListener("gattserverdisconnected", onDisconnected);
+    $("conn").textContent = "connecting...";
+    const server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(SERVICE);
+    const status = await svc.getCharacteristic(STATUS);
+    const alert = await svc.getCharacteristic(ALERT);
+    cmdChar = await svc.getCharacteristic(COMMAND);
+    status.addEventListener("characteristicvaluechanged", onStatus);
+    alert.addEventListener("characteristicvaluechanged", onAlert);
+    await status.startNotifications();
+    await alert.startNotifications();
+    $("conn").textContent = `connected: ${device.name || "helmet"}`;
+    $("conn").classList.add("on");
+    $("connectBtn").disabled = true;
+    $("disconnectBtn").disabled = false;
+    logEvent("connected");
+  } catch (err) {
+    $("conn").textContent = "disconnected";
+    logEvent(`error: ${err.message}`);
+  }
+}
+
+function onDisconnected() {
+  $("conn").textContent = "disconnected";
+  $("conn").classList.remove("on");
+  $("connectBtn").disabled = false;
+  $("disconnectBtn").disabled = true;
+  cmdChar = null;
+  logEvent("disconnected");
+}
+
+$("connectBtn").addEventListener("click", connect);
+$("disconnectBtn").addEventListener("click", () => device && device.gatt.connected && device.gatt.disconnect());
+$("clearBtn").addEventListener("click", async () => {
+  if (!cmdChar) return;
+  try {
+    await cmdChar.writeValue(new TextEncoder().encode("CLEAR"));
+    logEvent("sent CLEAR");
+  } catch (err) {
+    logEvent(`clear failed: ${err.message}`);
+  }
+});
+</script>
+</body>
+</html>
